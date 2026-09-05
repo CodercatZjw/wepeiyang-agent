@@ -1,0 +1,17 @@
+{
+  "llm": {
+    "url": "https://api.openai.com/v1/responses",
+    "api_key": "在这里填写你的 API Key",
+    "model": "在这里填写模型名",
+    "api_format": "responses",
+    "timeout_seconds": 60
+  },
+  "agent": {
+    "goal": "浏览微北洋最新帖子。发现近期新帖时继续向下刷；连续页面没有新帖子或已经获得足够信息时停止。",
+    "max_pages": 8,
+    "stop_after_stale_pages": 2,
+    "settle_seconds": 1.8,
+    "save_screenshots": true,
+    "send_body_chars": 240
+  }
+}
