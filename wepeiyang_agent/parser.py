@@ -18,6 +18,7 @@ class UiNode:
     class_name: str
     clickable: bool
     scrollable: bool
+    selected: bool = False
 
     @property
     def center(self) -> tuple[int, int]:
@@ -38,6 +39,11 @@ class ForumPost:
     replies: int | None
     views: int | None
     raw_description: str
+    section: str | None = None
+    card_bounds: tuple[int, int, int, int] = (0, 0, 0, 0)
+    image_bounds: tuple[tuple[int, int, int, int], ...] = ()
+    images: tuple[str, ...] = ()
+    comments: tuple[dict, ...] = ()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -61,6 +67,7 @@ def parse_nodes(xml_bytes: bytes) -> list[UiNode]:
                 class_name=element.attrib.get("class", ""),
                 clickable=element.attrib.get("clickable") == "true",
                 scrollable=element.attrib.get("scrollable") == "true",
+                selected=element.attrib.get("selected") == "true",
             )
         )
     return nodes
@@ -83,7 +90,7 @@ def find_node(nodes: list[UiNode], description: str) -> UiNode | None:
     return partial[0] if partial else None
 
 
-def _parse_post(description: str) -> ForumPost | None:
+def parse_post_description(description: str) -> ForumPost | None:
     lines = [line.strip() for line in description.splitlines() if line.strip()]
     id_index = next((i for i, line in enumerate(lines) if POST_ID_RE.match(line)), None)
     if id_index is None:
@@ -114,9 +121,9 @@ def _parse_post(description: str) -> ForumPost | None:
             metric_numbers.append(int(lines[scan]))
             scan -= 1
         if metric_numbers:
-            replies = metric_numbers[0]
+            likes = metric_numbers[0]
         if len(metric_numbers) > 1:
-            likes = metric_numbers[1]
+            replies = metric_numbers[1]
         content_end = scan + 1
 
     content = lines[cursor:content_end]
@@ -141,14 +148,43 @@ def _parse_post(description: str) -> ForumPost | None:
 
 
 def parse_posts(xml_bytes: bytes) -> list[ForumPost]:
+    root = ET.fromstring(xml_bytes)
+    section = selected_section(xml_bytes)
     posts: list[ForumPost] = []
     seen: set[str] = set()
-    for node in parse_nodes(xml_bytes):
-        if "#MP" not in node.description:
+    for element in root.iter("node"):
+        description = element.attrib.get("content-desc", "")
+        if "#MP" not in description:
             continue
-        post = _parse_post(node.description)
+        post = parse_post_description(description)
         if post and post.post_id not in seen:
+            post.section = section
+            post.card_bounds = parse_bounds(element.attrib.get("bounds", ""))
+            image_bounds: list[tuple[int, int, int, int]] = []
+            for child in element.iter("node"):
+                if "ImageView" not in child.attrib.get("class", ""):
+                    continue
+                bounds = parse_bounds(child.attrib.get("bounds", ""))
+                x1, y1, x2, y2 = bounds
+                if x2 - x1 >= 180 and y2 - y1 >= 100:
+                    image_bounds.append(bounds)
+            post.image_bounds = tuple(image_bounds)
             seen.add(post.post_id)
             posts.append(post)
     return posts
 
+
+def selected_section(xml_bytes: bytes) -> str | None:
+    section_names = {"精华", "湖底", "校务", "学习", "Bugs", "交往", "美食", "社团"}
+    fallback: str | None = None
+    for node in parse_nodes(xml_bytes):
+        if "Tab " not in node.description:
+            continue
+        name = node.description.splitlines()[0].strip()
+        if name not in section_names:
+            continue
+        if node.selected:
+            return name
+        if fallback is None and node.description.startswith("湖底\n"):
+            fallback = "湖底"
+    return fallback

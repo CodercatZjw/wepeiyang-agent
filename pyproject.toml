@@ -1,9 +1,9 @@
 [project]
 name = "wepeiyang-browse-agent"
-version = "0.2.0"
+version = "0.3.0"
 description = "Read-only BlueStacks browser and collector for the WePeiYang forum."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["Pillow>=10"]
 
 [project.scripts]
 wpy-agent = "wepeiyang_agent.cli:main"

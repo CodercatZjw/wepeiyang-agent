@@ -8,7 +8,8 @@ from pathlib import Path
 
 from .adb import AdbClient, AdbError
 from .llm import LlmController
-from .parser import find_node, parse_nodes, parse_posts, screen_bounds
+from .forum import ForumClient
+from .parser import parse_posts, screen_bounds
 
 
 PACKAGE = "com.twt.service"
@@ -50,33 +51,9 @@ class BrowseAgent:
         return all(marker in descriptions for marker in FORUM_MARKERS)
 
     def open_forum(self, latest: bool = True) -> bytes:
-        if not self.adb.package_installed(PACKAGE):
-            raise AdbError("模拟器里没有检测到天外天/微北洋（包名 com.twt.service）。")
-        self.adb.start_app(COMPONENT)
-        self._sleep(2.0)
-        xml_bytes = self.adb.hierarchy()
-        if not self._is_forum(xml_bytes):
-            width, height = screen_bounds(xml_bytes)
-            # 天外天底部四个入口中，第二个是微北洋论坛。
-            self.adb.tap(round(width * 0.375), round(height * 0.958))
-            self._sleep(2.0)
-            xml_bytes = self.adb.hierarchy()
-
-        if not self._is_forum(xml_bytes):
-            page_text = "\n".join(node.description for node in parse_nodes(xml_bytes) if node.description)
-            if any(word in page_text for word in ("登录", "统一身份认证", "验证码")):
-                raise AdbError("天外天停在登录页。请先在模拟器中手动完成登录，再重新运行。")
-            if "同意" in page_text and "用户" in page_text:
-                raise AdbError("天外天停在首次使用协议页。请先在模拟器中确认协议，再重新运行。")
-            raise AdbError("没有进入微北洋论坛，请确认应用版本和底部导航布局。")
-
-        if latest:
-            node = find_node(parse_nodes(xml_bytes), "最新发帖")
-            if node and node.clickable:
-                self.adb.tap(*node.center)
-                self._sleep()
-                xml_bytes = self.adb.hierarchy()
-        return xml_bytes
+        return ForumClient(self.adb, self.settle_seconds).open_forum(
+            section="湖底", latest=latest
+        )
 
     def _load_seen(self) -> set[str]:
         path = self.data_dir / "state.json"
