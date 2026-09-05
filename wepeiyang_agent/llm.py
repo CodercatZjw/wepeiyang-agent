@@ -117,19 +117,51 @@ class LlmController:
             raise LlmError("Responses API 响应中没有 output_text。")
         return "".join(texts)
 
-    def decide(self, observation: dict) -> LlmDecision:
-        request_body = json.dumps(
-            self._request_payload(observation), ensure_ascii=False
-        ).encode("utf-8")
+    def request_json(
+        self,
+        system_prompt: str,
+        input_payload: dict,
+        schema: dict,
+        schema_name: str,
+        max_output_tokens: int = 600,
+    ) -> dict:
+        prompt = json.dumps(input_payload, ensure_ascii=False, separators=(",", ":"))
+        if self.config.api_format == "responses":
+            payload = {
+                "model": self.config.model,
+                "instructions": system_prompt,
+                "input": prompt,
+                "max_output_tokens": max_output_tokens,
+                "store": False,
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": schema_name,
+                        "strict": True,
+                        "schema": schema,
+                    }
+                },
+            }
+        else:
+            payload = {
+                "model": self.config.model,
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+
         request = urllib.request.Request(
             self.config.url,
-            data=request_body,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST",
             headers={
                 "Authorization": f"Bearer {self.config.api_key}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "wepeiyang-browse-agent/0.2",
+                "User-Agent": "wepeiyang-agent/0.4",
             },
         )
         try:
@@ -144,8 +176,16 @@ class LlmController:
             response_payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise LlmError("LLM API 没有返回有效 JSON 响应。") from exc
+        return _extract_json(self._response_text(response_payload))
 
-        decision_payload = _extract_json(self._response_text(response_payload))
+    def decide(self, observation: dict) -> LlmDecision:
+        decision_payload = self.request_json(
+            SYSTEM_PROMPT,
+            observation,
+            ACTION_SCHEMA,
+            "browse_action",
+            max_output_tokens=200,
+        )
         action = str(decision_payload.get("action", "")).strip().lower()
         reason = str(decision_payload.get("reason", "")).strip()
         if action not in {"scroll", "stop"}:
@@ -153,4 +193,3 @@ class LlmController:
         if not reason:
             reason = "模型未提供原因"
         return LlmDecision(action=action, reason=reason)
-

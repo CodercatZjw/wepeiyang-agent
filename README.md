@@ -67,6 +67,28 @@ python -m wepeiyang_agent llm-test
 
 ### 3. 开始刷帖
 
+最简单的方式是双击项目根目录的 `wepeiyang-agent.cmd`。在打开的 CMD 窗口中直接输入自然语言，Agent 会显示执行计划，并在同一窗口返回帖子正文、互动数据、评论和图片保存路径。
+
+也可以从 PowerShell 启动交互窗口：
+
+```powershell
+python -m wepeiyang_agent chat
+```
+
+执行单条自然语言指令后退出：
+
+```powershell
+python -m wepeiyang_agent chat --ask "给我在湖底找 3 篇超过 10 赞的帖子"
+```
+
+只查看 LLM 生成的计划、不操作模拟器：
+
+```powershell
+python -m wepeiyang_agent chat --ask "搜索有关国创赛的最新内容" --plan-only
+```
+
+传统的自动刷帖入口仍然保留：
+
 让配置的 LLM 根据当前页面决定继续滚动或停止：
 
 ```powershell
@@ -161,6 +183,12 @@ python -m wepeiyang_agent find `
 - 论坛内容可能包含联系方式等个人信息；采集结果默认只保存在本机，请勿直接公开上传。
 - `browse` 会把受配置长度限制的标题和正文片段发送给你配置的 LLM 服务；`find` 和 `search` 的过滤逻辑本身不要求调用 LLM。
 - 可把 `send_body_chars` 设为 `0`，让刷帖决策只发送标题。
+
+## 免责声明
+
+- 本项目仅供**个人学习、技术交流**，禁止用于违规行为。
+- **用户需自行遵守微北洋《用户协议》《隐私政策》等相关规定。**
+- 本项目**与微北洋、天外天工作室、天津大学无任何关联**。
 
 ## 开发与验证
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from .adb import AdbClient, AdbError, find_adb
 from .agent import BrowseAgent, PACKAGE
 from .config import ConfigError, load_config
+from .console_agent import ConsoleAgent, run_console
 from .llm import LlmController, LlmError
 from .forum import ForumClient, SECTIONS
 from .query import QueryEngine, QuerySpec, parse_since
@@ -53,6 +54,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="每次页面操作后等待秒数（默认读取配置）",
     )
     subparsers.add_parser("llm-test", help="调用一次 LLM API，检查 URL、Key 和返回格式")
+    chat = subparsers.add_parser("chat", help="启动自然语言 CMD 交互 Agent")
+    chat.add_argument("--ask", help="执行一条指令后退出；省略时进入交互模式")
+    chat.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="只显示 LLM 生成的只读计划，不操作模拟器（需配合 --ask）",
+    )
 
     def add_query_arguments(command: argparse.ArgumentParser, search: bool = False) -> None:
         command.add_argument(
@@ -217,6 +225,19 @@ def run_query(args: argparse.Namespace, source: str) -> int:
     return 0
 
 
+def chat(args: argparse.Namespace) -> int:
+    if args.plan_only and not args.ask:
+        raise ValueError("--plan-only 需要配合 --ask 使用。")
+    config = load_config(args.config.resolve(), require_llm=True)
+    agent = ConsoleAgent(
+        config,
+        args.data_dir.resolve(),
+        adb_path=args.adb,
+        serial=args.serial,
+    )
+    return run_console(agent, ask=args.ask, plan_only=args.plan_only)
+
+
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -235,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "llm-test":
             return llm_test(args)
+        if args.command == "chat":
+            return chat(args)
         if args.command == "browse":
             return browse(args)
         if args.command == "find":
