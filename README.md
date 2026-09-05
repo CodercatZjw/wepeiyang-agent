@@ -1,37 +1,48 @@
-# 微北洋只读 Agent
+<div align="center">
 
-这个版本通过蓝叠中的天外天 App，只读浏览、筛选和搜索微北洋帖子。既可以直接使用 CLI，也可以由 Codex 的 `wepeiyang-forum` Skill 根据自然语言调用。
+# WePeiYang Agent
 
-它不会发帖、回复、点赞、点踩或收藏。帖子通过安卓页面的无障碍结构读取，不依赖 OCR，也不会直接调用或逆向论坛接口。
+**让 AI 在安卓模拟器里安全地阅读、搜索和采集微北洋帖子。**
 
-## 当前能力
+<img src="assets/banner.webp" alt="WePeiYang Agent — Read, Search, Collect" width="100%">
 
-- 自动发现蓝叠中国版/国际版自带的 `HD-Adb.exe`
-- 检查模拟器与 `com.twt.service` 安装状态
-- 自动冷启动天外天并进入底部第二个“微北洋”入口
-- 通过配置的 OpenAI 兼容 LLM API 决定每一屏继续滚动还是停止
-- LLM 只能选择 `scroll` 或 `stop`，无法点赞、回复、收藏或发帖
-- 读取作者、等级、发布时间、帖子编号、标题、正文、互动数和浏览量
-- 逐屏滚动、按帖子编号去重
-- 连续多屏没有新帖时自动停止
-- 保存每次运行的帖子 JSONL、运行摘要和页面截图
-- 保存跨运行去重状态，便于后续接入“每天总结”
-- 按分区、关键词、点赞数、时间和是否带图筛选
-- hybrid 搜索：先查本地索引，不足时实时浏览补充
-- 打开帖子详情，保存可见图片区域并采集评论
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%2B%20BlueStacks-555555)
+![Mode](https://img.shields.io/badge/Mode-Read--only-C9A45C)
 
-## 首次准备
+</div>
 
-1. 启动蓝叠和天外天。
-2. 在天外天中手动完成登录、用户协议等一次性操作。
-3. 在蓝叠“设置 → 高级”中打开 Android 调试桥（ADB）。本机上的蓝叠已为本项目打开该开关。
-4. 在本目录打开 PowerShell。
+WePeiYang Agent 是一个运行在蓝叠模拟器外部的只读校园论坛 Agent。它通过 ADB 驱动天外天 App，从安卓无障碍页面结构中读取帖子，再由 CLI 或 Codex Skill 完成分区浏览、条件筛选、关键词搜索、图片保存和评论采集。
 
-本项目只使用 Python 标准库，不需要安装第三方依赖。
+它不依赖 OCR，也不调用或逆向论坛私有接口；公开能力中没有发帖、回复、点赞、点踩或收藏操作。
 
-## 配置 LLM API
+## 为什么做它
 
-编辑本目录的 `config.json`：
+校园论坛的信息价值往往埋在持续刷新的信息流里：课程资料、竞赛消息、校园服务和偶发趣事都很分散。这个项目先把“稳定、安全地读帖”做成通用底座，为后续的定时摘要和手机推送提供结构化数据。
+
+当前版本聚焦采集。自动总结、定时运行和手机推送尚未接入。
+
+## 快速开始
+
+### 1. 准备环境
+
+你需要：
+
+- Windows 与蓝叠模拟器
+- 已安装并登录的天外天 App（包名 `com.twt.service`）
+- 在蓝叠设置中开启 ADB
+- Python 3.10 或更高版本
+
+安装项目：
+
+```powershell
+python -m pip install -e .
+Copy-Item config.example.json config.json
+```
+
+### 2. 配置 LLM API
+
+编辑 `config.json`：
 
 ```json
 {
@@ -45,91 +56,126 @@
 }
 ```
 
-- `url` 必须是完整请求地址，不是只有域名。
-- OpenAI Responses API 使用 `api_format: "responses"`。
-- 兼容 `/v1/chat/completions` 的服务使用 `api_format: "chat_completions"`。
-- `config.json` 已被 Git 忽略，API Key 不会进入提交。
-- 完整配置字段可参考 `config.example.json`。
+`url` 必须是完整请求地址。OpenAI Responses API 使用 `responses`；兼容 `/v1/chat/completions` 的服务使用 `chat_completions`。真实的 `config.json` 已被 Git 忽略。
 
-测试 LLM 连接：
-
-```powershell
-python -m wepeiyang_agent llm-test
-```
-
-## 使用
-
-先检查环境：
+验证蓝叠与模型连接：
 
 ```powershell
 python -m wepeiyang_agent doctor
+python -m wepeiyang_agent llm-test
 ```
 
-启动 LLM 控制的刷帖 Agent（最大页数读取 `config.json`）：
+### 3. 开始刷帖
+
+让配置的 LLM 根据当前页面决定继续滚动或停止：
 
 ```powershell
 python -m wepeiyang_agent browse
 ```
 
-列出分区：
+LLM 在这个模式里只能返回 `scroll` 或 `stop`。即使模型输出异常，也不会获得互动或发布帖子的入口。
+
+## 用自然语言调用
+
+项目附带 [`wepeiyang-forum` Skill](skill/wepeiyang-forum/SKILL.md)。安装到 Codex 后，可以直接描述目标：
 
 ```powershell
-python -m wepeiyang_agent sections
+Copy-Item -Recurse skill\wepeiyang-forum "$env:USERPROFILE\.codex\skills\wepeiyang-forum"
 ```
 
-在湖底实时寻找 3 篇至少 11 赞的帖子：
+```text
+给我在湖底找 3 篇超过 10 赞的帖子
+搜索有关国创赛的最新内容
+从学习区找两篇带图帖，并把评论一起带回来
+```
+
+Skill 会把自然语言转换为有限、只读的 CLI 参数，并始终设置数量、页数和运行时间上限。信息流没有尽头，Agent 不以“刷完”为完成条件。
+
+## CLI 示例
+
+实时筛选湖底中超过 10 赞的帖子：
 
 ```powershell
-python -m wepeiyang_agent find --section 湖底 --min-likes 11 --count 3 --max-pages 30 --json
+python -m wepeiyang_agent find `
+  --section 湖底 `
+  --min-likes 11 `
+  --count 3 `
+  --max-pages 30 `
+  --max-seconds 300 `
+  --json
 ```
 
-搜索国创赛相关最新内容；`|` 表示同义词任选其一：
+搜索国创赛相关内容；`|` 表示任一同义词命中：
 
 ```powershell
-python -m wepeiyang_agent search --query "国创赛|国创|创新大赛|大创" --section 全部 --source hybrid --count 5 --json
+python -m wepeiyang_agent search `
+  --query "国创赛|国创|创新大赛|大创" `
+  --section 全部 `
+  --source hybrid `
+  --count 5 `
+  --json
 ```
 
-只找带图帖，进入详情保存图片并采集评论：
+打开带图帖详情，保存可见图片并读取评论：
 
 ```powershell
-python -m wepeiyang_agent find --section 湖底 --only-images --include-images --include-comments --count 3 --json
+python -m wepeiyang_agent find `
+  --section 湖底 `
+  --only-images `
+  --include-images `
+  --include-comments `
+  --count 3 `
+  --json
 ```
 
-所有实时命令都有硬预算：`--count`、`--max-pages` 和 `--max-seconds`。信息流不需要、也不可能“刷完”。
+常用筛选项包括 `--since 7d`、`--exclude-pinned`、`--min-likes`、`--only-images`。运行 `python -m wepeiyang_agent --help` 查看完整命令。
 
-快速试跑 3 屏，并且不保存截图：
+## 它如何工作
+
+`自然语言 → Codex Skill → 只读 CLI → ADB → 天外天界面 → 结构化帖子 → 本地索引 / JSON`
+
+- **页面读取**：解析安卓 UI hierarchy，而不是识别截图文字。
+- **混合搜索**：`hybrid` 先查本地索引，不足时再进入 App 实时浏览。
+- **图片模式**：打开详情并保存屏幕中可见的图片区域；不下载原图，也不发送给视觉模型。
+- **安全停止**：目标数量、最大页数、最长时间和连续无新帖共同限制运行范围。
+
+## 数据产物
+
+默认数据目录为 `data/`：
+
+| 路径 | 内容 |
+| --- | --- |
+| `posts.jsonl` | 跨运行累计的新帖子 |
+| `state.json` | 已见帖子编号与去重状态 |
+| `index.json` | 本地全文检索索引 |
+| `runs/<时间>/` | 一次 LLM 刷帖的帖子、决策、统计与截图 |
+| `queries/<时间>/result.json` | 一次筛选或搜索的结构化结果 |
+| `queries/<时间>/media/` | 从帖子详情保存的可见图片 |
+
+单篇帖子会尽量包含作者、等级、发布时间、帖子编号、标题、正文、分区、点赞数、回复数、浏览量、图片路径和评论。
+
+## 安全与隐私边界
+
+- CLI 只暴露读取、搜索、打开详情和返回操作。
+- 如果页面结构改变或落在未知页面，程序会停止，而不是继续盲点。
+- 论坛内容可能包含联系方式等个人信息；采集结果默认只保存在本机，请勿直接公开上传。
+- `browse` 会把受配置长度限制的标题和正文片段发送给你配置的 LLM 服务；`find` 和 `search` 的过滤逻辑本身不要求调用 LLM。
+- 可把 `send_body_chars` 设为 `0`，让刷帖决策只发送标题。
+
+## 开发与验证
 
 ```powershell
-python -m wepeiyang_agent browse --pages 3 --no-screenshots
+python -m unittest discover -s tests -v
 ```
 
-如果同时开了多个模拟器，用下面的命令指定设备：
+当前测试覆盖帖子结构解析、图片节点识别、评论解析、筛选规则，以及 Responses / Chat Completions 两种 LLM 返回格式。
 
-```powershell
-python -m wepeiyang_agent --serial emulator-5554 browse --pages 8
-```
+## 路线图
 
-## 输出
+- 按时间窗口聚合本轮新增帖子
+- 让 LLM 区分“趣事”与“有用信息”并生成摘要
+- 接入定时任务与手机推送
 
-默认写入 `data/`：
+## 许可证
 
-- `data/posts.jsonl`：跨运行累计的新帖子，一行一篇
-- `data/state.json`：已见帖子编号，用于去重
-- `data/runs/<时间>/posts.jsonl`：某次运行看到的全部帖子
-- `data/runs/<时间>/run.json`：本次运行统计
-- `data/runs/<时间>/decisions.jsonl`：每屏 LLM 的动作与原因
-- `data/runs/<时间>/screens/`：每屏截图
-- `data/index.json`：本地全文检索索引
-- `data/queries/<时间>/result.json`：筛选或搜索结果
-- `data/queries/<时间>/media/<帖子编号>/`：详情页裁剪出的图片
-
-这些数据已经为下一阶段预留好了接口：定时运行后，可以只取本轮新帖，交给模型筛选“趣事”和“有用信息”，再推送到手机。
-
-## 边界与注意事项
-
-- CLI 只开放浏览、搜索、详情和返回动作，不开放发帖、回复、点赞、点踩或收藏。
-- 如果天外天升级并改变底部导航或论坛页面标识，程序会停止并报错，不会在未知页面盲点。
-- 采集内容可能包含联系方式等个人信息；当前结果只保存在本机，请勿公开上传。
-- 为了决策，程序会把帖子标题和正文前 `send_body_chars` 个字符发送给你配置的 LLM 服务；可将该值设为 `0`，只发送标题。
-- 图片模式只保存本机截图裁剪，不发送给视觉模型，也不下载或逆向原图地址。
-- 建议控制频率，例如每隔数小时运行一次，每次 5–15 屏，避免给应用和服务造成不必要负担。
+当前仓库尚未声明开源许可证。对外发布前，请根据你的发布方式补充合适的许可证文件。
