@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from wepeiyang_agent.config import LlmConfig
@@ -56,7 +57,25 @@ class LlmControllerTests(unittest.TestCase):
             decision = LlmController(config).decide({"posts": []})
         self.assertEqual(decision.action, "stop")
 
+    def test_retries_transient_connection_error(self) -> None:
+        config = LlmConfig(
+            url="https://example.invalid/v1/responses",
+            api_key="secret",
+            model="test-model",
+            api_format="responses",
+        )
+        response = {"output_text": '{"action":"stop","reason":"完成"}'}
+        with (
+            patch(
+                "urllib.request.urlopen",
+                side_effect=[urllib.error.URLError("temporary"), FakeResponse(response)],
+            ) as request,
+            patch("time.sleep"),
+        ):
+            decision = LlmController(config).decide({"posts": []})
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(decision.action, "stop")
+
 
 if __name__ == "__main__":
     unittest.main()
-

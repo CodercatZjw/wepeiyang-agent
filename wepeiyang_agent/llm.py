@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -164,14 +165,28 @@ class LlmController:
                 "User-Agent": "wepeiyang-agent/0.4",
             },
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
-                raw = response.read()
-        except urllib.error.HTTPError as exc:
-            details = exc.read().decode("utf-8", "replace")[:1000]
-            raise LlmError(f"LLM API 返回 HTTP {exc.code}：{details}") from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise LlmError(f"无法连接 LLM API：{exc}") from exc
+        raw: bytes | None = None
+        last_error: BaseException | None = None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=self.config.timeout_seconds
+                ) as response:
+                    raw = response.read()
+                break
+            except urllib.error.HTTPError as exc:
+                details = exc.read().decode("utf-8", "replace")[:1000]
+                retryable = exc.code in {408, 429} or exc.code >= 500
+                if not retryable or attempt == 2:
+                    raise LlmError(f"LLM API 返回 HTTP {exc.code}：{details}") from exc
+                last_error = exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if attempt == 2:
+                    raise LlmError(f"无法连接 LLM API：{exc}") from exc
+                last_error = exc
+            time.sleep(attempt + 1)
+        if raw is None:
+            raise LlmError(f"无法连接 LLM API：{last_error}")
         try:
             response_payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:

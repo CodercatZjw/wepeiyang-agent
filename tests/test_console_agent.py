@@ -11,7 +11,7 @@ from wepeiyang_agent.llm import LlmError
 def valid_payload(**updates) -> dict:
     payload = {
         "action": "find",
-        "query": None,
+        "query": "",
         "section": "湖底",
         "min_likes": 11,
         "count": 3,
@@ -55,7 +55,21 @@ class CommandPlannerTests(unittest.TestCase):
 
     def test_search_requires_query(self) -> None:
         with self.assertRaises(LlmError):
-            CommandPlanner._validate(valid_payload(action="search", query=None))
+            CommandPlanner._validate(valid_payload(action="search", query=""))
+
+    def test_recovers_keyword_from_natural_language(self) -> None:
+        plan = CommandPlanner._validate(
+            valid_payload(action="search", query=""),
+            "给我找一下有关国创赛的内容",
+        )
+        self.assertEqual(plan.query, "国创赛|国创|创新大赛|大创")
+
+    def test_recovers_keyword_from_short_search(self) -> None:
+        plan = CommandPlanner._validate(
+            valid_payload(action="search", query=""),
+            "搜索 国创赛",
+        )
+        self.assertEqual(plan.query, "国创赛|国创|创新大赛|大创")
 
     def test_normalizes_section_suffix(self) -> None:
         plan = CommandPlanner._validate(valid_payload(section="学习区"))

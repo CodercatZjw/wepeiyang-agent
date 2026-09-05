@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -19,7 +20,7 @@ PLAN_SCHEMA = {
             "type": "string",
             "enum": ["find", "search", "browse", "sections", "help", "exit"],
         },
-        "query": {"type": ["string", "null"]},
+        "query": {"type": "string"},
         "section": {"type": "string", "enum": [*SECTIONS, "全部"]},
         "min_likes": {"type": ["integer", "null"]},
         "count": {"type": "integer"},
@@ -68,6 +69,7 @@ PLAN_SYSTEM_PROMPT = """你是微北洋校园论坛只读 Agent 的指令规划�
 - 严禁规划发帖、回复、点赞、点踩、收藏、登录、用户资料操作或任意系统命令；此类请求返回 help。
 - “超过 N 赞”转换为 min_likes=N+1；“至少 N 赞”转换为 min_likes=N。
 - 关键词的常见同义表达可以用 | 连接，例如“国创赛|国创|创新大赛|大创”。
+- action=search 时 query 必须是非空关键词；其他动作没有关键词时 query 使用空字符串，不能使用 null。
 - 用户说“随便找”时用 find，默认湖底、3 篇。
 - 用户说“最新”表示按已有时间倒序，不要擅自添加 since；只有明确说最近几天/小时才填写 since。
 - 用户要求带图帖时 only_images=true；要求保存或查看图片时同时 include_images=true。
@@ -114,10 +116,10 @@ class CommandPlanner:
             "forum_command",
             max_output_tokens=700,
         )
-        return self._validate(payload)
+        return self._validate(payload, instruction)
 
     @staticmethod
-    def _validate(payload: dict) -> CommandPlan:
+    def _validate(payload: dict, instruction: str = "") -> CommandPlan:
         action = str(payload.get("action", "")).strip().lower()
         allowed_actions = {"find", "search", "browse", "sections", "help", "exit"}
         if action not in allowed_actions:
@@ -138,7 +140,9 @@ class CommandPlanner:
         query_value = payload.get("query")
         query = query_value.strip() if isinstance(query_value, str) else None
         if action == "search" and not query:
-            raise LlmError("模型选择了搜索，但没有给出关键词。")
+            query = _infer_query(instruction)
+        if action == "search" and not query:
+            raise LlmError("模型选择了搜索，但无法从指令中确定关键词。")
 
         min_likes_value = payload.get("min_likes")
         min_likes = min_likes_value if isinstance(min_likes_value, int) else None
@@ -176,6 +180,39 @@ def _bounded_int(value: object, default: int, minimum: int, maximum: int) -> int
     if isinstance(value, bool) or not isinstance(value, int):
         value = default
     return min(maximum, max(minimum, value))
+
+
+def _infer_query(instruction: str) -> str | None:
+    text = instruction.strip().strip("，。！？!? ")
+    if not text:
+        return None
+
+    about = re.search(
+        r"(?:有关|关于)\s*[《“\"']?(.+?)[》”\"']?\s*(?:的)?\s*"
+        r"(?:(?:最新|最近|近期)\s*)?(?:内容|帖子|信息|消息)(?:\s|$)",
+        text,
+    )
+    if about:
+        candidate = about.group(1).strip("《》“”\"' ，。")
+    else:
+        candidate = re.sub(
+            r"^.*?(?:搜索|搜一下|搜一搜|查询|查找|查一下|搜)\s*",
+            "",
+            text,
+            count=1,
+        )
+        candidate = re.sub(
+            r"\s*(?:相关)?(?:的)?\s*(?:(?:最新|最近|近期)\s*)?"
+            r"(?:内容|帖子|信息|消息)\s*$",
+            "",
+            candidate,
+        ).strip("《》“”\"' ，。")
+
+    if not candidate or candidate == text:
+        return None
+    if candidate in {"国创赛", "国创", "创新大赛", "大创"}:
+        return "国创赛|国创|创新大赛|大创"
+    return candidate
 
 
 HELP_TEXT = """你可以直接输入，例如：
