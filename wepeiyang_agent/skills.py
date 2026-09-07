@@ -18,7 +18,17 @@ def schema(properties=None, required=()):
 
 STRING = {"type": "string", "minLength": 1}
 BOOL = {"type": "boolean"}
+TAP_SCHEMA = schema({"screen_id": STRING, "node_id": STRING,
+    "x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0}}, ["screen_id"])
+TAP_SCHEMA["oneOf"] = [{"required": ["node_id"], "not": {"anyOf": [{"required": ["x"]}, {"required": ["y"]}]}},
+                       {"required": ["x", "y"], "not": {"required": ["node_id"]}}]
 SKILLS = {
+    "app.observe": ("app-navigation", "读取天外天/微北洋当前页面节点和截图，获取 screen_id；查成绩、课表或任意 App 导航从此开始。", schema()),
+    "app.open": ("app-navigation", "将天外天切到前台并观察，不重启、不清除登录状态。", schema()),
+    "app.tap": ("app-navigation", "点击最新截图中的控件 node_id 或像素区域 x/y，需 screen_id；执行后返回新页面。只读导航。", TAP_SCHEMA),
+    "app.swipe": ("app-navigation", "在当前可滚动区域滑动一次并回读页面；direction 是手指方向，up 表示上滑看下方内容。",
+        schema({"screen_id": STRING, "direction": {"type": "string", "enum": ["up", "down", "left", "right"]}, "node_id": STRING}, ["screen_id", "direction"])),
+    "app.back": ("app-navigation", "在天外天按返回键一次并重新观察；需要最新 screen_id。", schema({"screen_id": STRING}, ["screen_id"])),
     "dialogue.reply": ("dialogue", "基于问题与提供的证据组织普通对话回答，不操作论坛。",
         schema({"message": STRING, "context": {"type": "string"}}, ["message"])),
     "forum.search": ("forum-search", "在原生搜索框输入一个或多个关键词；返回各词第一屏，游标位于最后一个词。",
@@ -82,6 +92,9 @@ class SkillRegistry:
         # Load the same installed instructions that are exposed to the planner.
         self.instructions(name)
         prefix, action = name.split(".", 1)
+        if prefix == "app":
+            from .app_ui import AppNavigator
+            return AppNavigator(self.forum, self.data_dir, self.llm.trace).invoke(action, arguments)
         if prefix == "memory":
             return getattr(self.memory, {"maintain": "maintain"}.get(action, action))(**arguments)
         if prefix == "file":

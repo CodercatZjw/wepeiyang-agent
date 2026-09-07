@@ -155,6 +155,11 @@ class AdbClient:
     def tap(self, x: int, y: int) -> None:
         self.shell("input", "tap", str(x), str(y))
 
+    def foreground_package(self) -> str | None:
+        output = self.shell("dumpsys", "window", "windows")
+        match = re.search(r"mCurrentFocus=Window\{[^\r\n]*?\s([\w.]+)/[^\s}]+", output)
+        return match.group(1) if match else None
+
     def input_unicode(self, text: str) -> None:
         """Input Chinese entirely over ADB, restoring the original input method."""
         import base64

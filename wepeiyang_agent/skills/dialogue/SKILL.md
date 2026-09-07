@@ -3,4 +3,4 @@ name: dialogue
 description: 处理普通对话、解释已有证据和组织中间回答。
 ---
 
-普通对话可由 Planner 直接形成最终回答并交 Checker 核对；不需要先操作论坛。需要在组合任务中间单独组织回答时可调用 dialogue.reply，提供 message 和可选证据 context。引用已有来源，不把猜测写成已搜索得到的事实。需要历史、新消息或图像时组合相应 Skills。
+普通对话直接回答：tasks=[]、task_id=""、skill=""、status=complete，不创建计划、不调用 dialogue.reply、不经过 Checker。无需从文件/记忆验证一句问候。需要在组合任务中间单独组织回答时才可调用 dialogue.reply，提供 message 和可选证据 context。需要工具的混合请求不能走纯对话快捷路径；引用已有来源，不把猜测写成已操作的事实。问当前账号成绩/课表先观察 App，问历史记录才检索记忆。

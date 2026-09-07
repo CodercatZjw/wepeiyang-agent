@@ -42,10 +42,13 @@ class RuntimeTests(unittest.TestCase):
 
     def test_chat_never_opens_emulator_and_persists_history(self):
         with tempfile.TemporaryDirectory() as d:
-            llm = FakeLlm([step(complete=True, answer="你好"), check(True)])
+            llm = FakeLlm([{**step(complete=True, answer="你好"), "tasks": [], "task_id": ""}])
             runtime = AgentRuntime(self.config(), Path(d), llm, lambda: self.fail("不应启动模拟器"), emit=None)
-            result = runtime.run("你好")
+            with patch("wepeiyang_agent.memory.MemoryStore.maintain", side_effect=AssertionError("闲聊不做维护")):
+                result = runtime.run("你好")
             self.assertEqual(result["status"], "complete")
+            self.assertEqual(llm.request_count, 1)
+            self.assertEqual(llm.inputs[0][0], "agent_decide")
             self.assertEqual(json.loads((Path(d) / "sessions/default.json").read_text(encoding="utf-8"))[-1]["content"], "你好")
 
     def test_composes_file_write_read_and_answer_with_check(self):
@@ -102,6 +105,44 @@ class RuntimeTests(unittest.TestCase):
                 with self.assertRaises(LlmTransportError):
                     AgentRuntime(self.config(), Path(d), llm, lambda: None, emit=None).run("你好")
             self.assertEqual(request.call_count, 1)
+
+    def test_corrected_final_answer_does_not_recheck_old_citation(self):
+        with tempfile.TemporaryDirectory() as d:
+            llm = FakeLlm([step("file.list"), check(),
+                step(complete=True, answer="错误旧引用 [E999]"),
+                {**check(True), "answer": "目录为空 [E1]", "evidence_ids": ["E1"]}])
+            result = AgentRuntime(self.config(), Path(d), llm, lambda: None, emit=None).run("看看文件")
+            self.assertEqual(result["answer"], "目录为空 [E1]")
+            self.assertEqual(llm.request_count, 4)
+
+    def test_app_navigation_skips_per_click_llm_check_but_checks_final(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as d:
+            image = Path(d) / "screen.png"
+            Image.new("RGB", (20, 20)).save(image)
+            llm = FakeLlm([step("app.observe"), step("app.tap", {"screen_id": "s1", "node_id": "n1"}),
+                step(complete=True, answer="页面已打开 [E2]"), {**check(True), "answer": "已核对新页面 [E2]"}])
+            with patch.object(SkillRegistry, "invoke", return_value={"image": str(image), "screen_id": "s1"}), \
+                 patch.object(llm, "request_json", wraps=llm.request_json) as request:
+                result = AgentRuntime(self.config(), Path(d), llm, lambda: None, emit=None).run("打开页面")
+            self.assertEqual([name for name, _ in llm.inputs], ["agent_decide", "agent_plan", "agent_plan", "agent_check"])
+            self.assertEqual(request.call_args_list[1].kwargs["images"], [image.resolve()])
+            self.assertEqual(result["answer"], "已核对新页面 [E2]")
+
+    def test_app_error_is_observed_and_budget_does_not_claim_success(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(SkillRegistry, "invoke", side_effect=ValueError("旧页面")):
+            result = AgentRuntime(self.config(1), Path(d), FakeLlm([step("app.observe")]), lambda: None, emit=None).run("打开页面")
+            self.assertEqual(result["status"], "budget_exhausted")
+            state = json.loads((Path(result["trace_dir"]) / "state.json").read_text(encoding="utf-8"))
+            self.assertFalse(state["checks"][-1]["passed"])
+
+    def test_pure_reply_cannot_cite_nonexistent_evidence(self):
+        with tempfile.TemporaryDirectory() as d:
+            llm = FakeLlm([{**step(complete=True, answer="你好 [E1]"), "tasks": []},
+                           {**step(complete=True, answer="你好"), "tasks": []}])
+            result = AgentRuntime(self.config(), Path(d), llm, lambda: None, emit=None).run("你好")
+            self.assertEqual(result["answer"], "你好")
+            self.assertEqual(llm.request_count, 2)
 
     def test_rejects_cyclic_task_graph(self):
         value = step("file.list")
