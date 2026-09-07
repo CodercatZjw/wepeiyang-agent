@@ -56,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("llm-test", help="调用一次 LLM API，检查 URL、Key 和返回格式")
     chat = subparsers.add_parser("chat", help="启动自然语言 CMD 交互 Agent")
     chat.add_argument("--ask", help="执行一条指令后退出；省略时进入交互模式")
+    chat.add_argument("--session", default="default", help="持久化对话会话名")
+    chat.add_argument("--resume", help="恢复未完成任务的 run_id")
     chat.add_argument(
         "--plan-only",
         action="store_true",
@@ -92,6 +94,14 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument(
         "--source", choices=["local", "live", "hybrid"], default="hybrid", help="搜索来源"
     )
+    catalog = subparsers.add_parser("skills", help="查看 Agent 能力目录和 Skill 文档")
+    catalog.add_argument("name", nargs="?", help="指定能力名称查看说明")
+    skill = subparsers.add_parser("skill", help="调用与 Agent 完全相同的底层 Skill，返回 JSON")
+    skill.add_argument("name")
+    skill.add_argument("--args", default="{}", help="JSON 参数对象")
+    skill.add_argument("--args-file", type=Path, help="从 UTF-8 JSON 文件读取参数")
+    traces = subparsers.add_parser("traces", help="列出运行日志，或输出指定运行的全部事件")
+    traces.add_argument("run_id", nargs="?")
     return parser
 
 
@@ -118,7 +128,8 @@ def doctor(args: argparse.Namespace) -> int:
 
 def llm_test(args: argparse.Namespace) -> int:
     config = load_config(args.config.resolve(), require_llm=True)
-    controller = LlmController(config.llm)
+    from .trace import Trace
+    controller = LlmController(config.llm, Trace(args.data_dir.resolve() / "traces", (config.llm.api_key,)))
     decision = controller.decide(
         {
             "goal": config.agent.goal,
@@ -151,7 +162,8 @@ def browse(args: argparse.Namespace) -> int:
     if pages < 1 or stale_pages < 1:
         raise AdbError("--pages 和 --stop-after-stale-pages 必须大于 0。")
     client = create_client(args)
-    controller = None if args.no_llm else LlmController(config.llm)
+    from .trace import Trace
+    controller = None if args.no_llm else LlmController(config.llm, Trace(args.data_dir.resolve() / "traces", (config.llm.api_key,)))
     agent = BrowseAgent(
         client,
         args.data_dir.resolve(),
@@ -209,6 +221,13 @@ def _print_query_result(result, as_json: bool) -> None:
 
 
 def run_query(args: argparse.Namespace, source: str) -> int:
+    if source == "local":
+        from .query import LocalIndex, QueryResult
+        spec = _query_spec(args)
+        posts = LocalIndex(args.data_dir.resolve()).search(spec)
+        _print_query_result(QueryResult(posts, "local", 0, None,
+            "target_count" if len(posts) >= spec.count else "local_exhausted"), args.json)
+        return 0
     client = create_client(args)
     forum = ForumClient(client, settle_seconds=args.settle_seconds)
     engine = QueryEngine(forum, args.data_dir.resolve())
@@ -220,7 +239,7 @@ def run_query(args: argparse.Namespace, source: str) -> int:
         "include_comments": args.include_comments,
         "screenshots": not args.no_screenshots,
     }
-    result = engine.live(spec, **options) if source == "live" else engine.search(spec, source=source, **options)
+    result = engine.live(spec, **options) if args.command == "find" and not spec.query else engine.search(spec, source=source, **options)
     _print_query_result(result, args.json)
     return 0
 
@@ -234,8 +253,46 @@ def chat(args: argparse.Namespace) -> int:
         args.data_dir.resolve(),
         adb_path=args.adb,
         serial=args.serial,
+        session=args.session,
+        resume=args.resume,
     )
-    return run_console(agent, ask=args.ask, plan_only=args.plan_only)
+    return run_console(agent, ask=args.ask or ("恢复上次任务" if args.resume else None), plan_only=args.plan_only)
+
+
+def run_skill(args):
+    from .skills import SkillRegistry, SKILLS
+    if args.command == "skills":
+        if args.name:
+            if args.name not in SKILLS:
+                raise ValueError("未知 Skill")
+            path = Path(__file__).with_name("skills") / SKILLS[args.name][0] / "SKILL.md"
+            print(path.read_text(encoding="utf-8"))
+        else:
+            print(json.dumps([{"name": name, "description": spec[1], "parameters": spec[2]} for name, spec in SKILLS.items()], ensure_ascii=False, indent=2))
+        return 0
+    from .memory import MemoryStore, Embeddings
+    from .trace import Trace
+    import portalocker
+    config = load_config(args.config.resolve(), require_llm=args.name.startswith(("vision.", "dialogue.")))
+    data_dir = args.data_dir.resolve()
+    trace = Trace(data_dir / "traces", (config.llm.api_key, config.memory.embedding_api_key))
+    llm = LlmController(config.llm, trace)
+    arguments = json.loads(args.args_file.read_text(encoding="utf-8-sig") if args.args_file else args.args)
+    with portalocker.Lock(data_dir / "agent.lock", timeout=1):
+        memory = MemoryStore(data_dir / "memory", Embeddings(config.memory, llm), trace)
+        try:
+            registry = SkillRegistry(data_dir, llm, memory,
+                lambda: ForumClient(create_client(args), settle_seconds=config.agent.settle_seconds))
+            trace.record("agent.tool", skill=args.name, arguments=arguments)
+            result = registry.invoke(args.name, arguments)
+            trace.record("agent.result", result=result)
+            print(json.dumps({"result": result, "run_id": trace.run_id, "trace_dir": str(trace.directory)}, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            trace.record("agent.error", error=str(exc))
+            raise
+        finally:
+            memory.close()
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -248,6 +305,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "doctor":
             return doctor(args)
+        if args.command == "traces":
+            import re
+            root = args.data_dir.resolve() / "traces"
+            if args.run_id:
+                if not re.fullmatch(r"[\w-]+", args.run_id):
+                    raise ValueError("无效 run id")
+                print((root / args.run_id / "events.jsonl").read_text(encoding="utf-8"))
+            else:
+                print(json.dumps(sorted([p.name for p in root.iterdir() if p.is_dir()], reverse=True) if root.exists() else [], ensure_ascii=False))
+            return 0
+        if args.command in {"skills", "skill"}:
+            return run_skill(args)
         if args.command == "sections":
             if args.json:
                 print(json.dumps({"sections": list(SECTIONS)}, ensure_ascii=False))

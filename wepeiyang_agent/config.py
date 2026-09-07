@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -29,9 +29,28 @@ class AgentConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeConfig:
+    max_steps: int = 40
+    max_seconds: int = 1200
+    max_requests: int = 100
+    context_chars: int = 60000
+    maintenance_hours: int = 24
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryConfig:
+    embedding_provider: str = "local"
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    embedding_url: str = ""
+    embedding_api_key: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     llm: LlmConfig
     agent: AgentConfig
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
 def _required_string(section: dict, key: str, label: str) -> str:
@@ -70,6 +89,11 @@ def load_config(path: Path, require_llm: bool = True) -> AppConfig:
         raise ConfigError("llm.api_format 只能是 chat_completions 或 responses。")
 
     goal = str(agent_data.get("goal", "浏览微北洋最新帖子并决定何时停止。")).strip()
+    try:
+        runtime_config = RuntimeConfig(**payload.get("runtime", {}))
+        memory_config = MemoryConfig(**payload.get("memory", {}))
+    except TypeError as exc:
+        raise ConfigError("runtime 或 memory 配置字段不正确：" + str(exc)) from exc
     config = AppConfig(
         llm=LlmConfig(
             url=url,
@@ -86,10 +110,20 @@ def load_config(path: Path, require_llm: bool = True) -> AppConfig:
             save_screenshots=bool(agent_data.get("save_screenshots", True)),
             send_body_chars=int(agent_data.get("send_body_chars", 240)),
         ),
+        runtime=runtime_config,
+        memory=memory_config,
     )
     if config.agent.max_pages < 1 or config.agent.stop_after_stale_pages < 1:
         raise ConfigError("agent.max_pages 和 agent.stop_after_stale_pages 必须大于 0。")
     if config.agent.send_body_chars < 0 or config.agent.send_body_chars > 4000:
         raise ConfigError("agent.send_body_chars 必须在 0 到 4000 之间。")
+    if any(type(value) is not int or value <= 0 for value in (
+        config.runtime.max_steps, config.runtime.max_seconds, config.runtime.max_requests,
+        config.runtime.context_chars, config.runtime.maintenance_hours,
+    )):
+        raise ConfigError("runtime 中的预算和维护间隔必须为正整数")
+    if config.memory.embedding_provider not in {"local", "remote"}:
+        raise ConfigError("memory.embedding_provider 必须为 local 或 remote")
+    if config.memory.embedding_provider == "remote" and not config.memory.embedding_url:
+        raise ConfigError("远程向量服务需要 memory.embedding_url")
     return config
-

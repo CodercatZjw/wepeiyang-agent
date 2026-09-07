@@ -37,6 +37,7 @@ class DetailResult:
     images: list[str]
     comments: list[dict]
     pages_scanned: int
+    text_blocks: list[str] | None = None
 
 
 def _is_forum(xml_bytes: bytes) -> bool:
@@ -58,6 +59,13 @@ def _is_forum(xml_bytes: bytes) -> bool:
 def _portrait(xml_bytes: bytes) -> bool:
     width, height = screen_bounds(xml_bytes)
     return height > width
+
+
+def _is_search_results(xml_bytes: bytes) -> bool:
+    if _is_forum(xml_bytes):
+        return False
+    nodes = parse_nodes(xml_bytes)
+    return bool(parse_posts(xml_bytes)) or any("未检索到相关问题" in n.description for n in nodes)
 
 
 def _bottom_nav(nodes: list[UiNode], width: int, height: int) -> list[UiNode]:
@@ -240,7 +248,7 @@ class ForumClient:
 
     def open_post(self, post: ForumPost) -> bytes:
         x1, y1, x2, y2 = post.card_bounds
-        if x2 <= x1 or y2 <= y1:
+        if x2 <= x1 or y2 - y1 < 80:
             raise AdbError(f"帖子 {post.post_id} 没有可点击区域。")
         x = (x1 + x2) // 2
         y = min(y2 - 25, y1 + 90)
@@ -251,6 +259,46 @@ class ForumClient:
             ),
             timeout=15,
         )
+
+    def search(self, keyword: str) -> bytes:
+        """Enter and verify the native search field; never scan a feed as fallback."""
+        xml_bytes = self.open_forum()
+        self._search_snapshot("feed", xml_bytes)
+        nodes = parse_nodes(xml_bytes)
+        width, height = screen_bounds(xml_bytes)
+        target = next((n for n in nodes if n.clickable and "Button" in n.class_name
+                       and n.bounds[1] < height * .07 and n.bounds[2] - n.bounds[0] > width * .6
+                       and any(word in n.description for word in ("推荐", "搜索"))), None)
+        if target is None:
+            raise AdbError("无法识别论坛搜索入口；未使用刷帖替代搜索")
+        self.adb.tap(*target.center)
+        xml_bytes = self._wait_hierarchy(lambda xml: any("EditText" in n.class_name for n in parse_nodes(xml)))
+        self._search_snapshot("editor", xml_bytes)
+        editor = next((n for n in parse_nodes(xml_bytes) if "EditText" in n.class_name), None)
+        if editor is None:
+            raise AdbError("没有进入原生搜索框")
+        self.adb.tap(*editor.center)
+        self.adb.input_unicode(keyword)
+        typed = self.adb.hierarchy()
+        self._search_snapshot("typed", typed)
+        if not any("EditText" in n.class_name and n.description.strip() == keyword for n in parse_nodes(typed)):
+            raise AdbError("搜索词输入未通过回读检查，已停止，未执行搜索")
+        # The top-right icon is Clear, not Search. Submit through the editor.
+        self.adb.shell("input", "keyevent", "66")
+        # Populated results retain an EditText. Recognize result cards/empty state instead.
+        xml_bytes = self._wait_hierarchy(_is_search_results)
+        self._search_snapshot("results", xml_bytes)
+        if not _is_search_results(xml_bytes):
+            raise AdbError("没有确认搜索结果页，已停止")
+        return xml_bytes
+
+    def _search_snapshot(self, stage, xml):
+        directory = getattr(self, "diagnostics_dir", None)
+        if directory:
+            directory.mkdir(parents=True, exist_ok=True)
+            name = str(time.time_ns()) + "-" + stage
+            (directory / (name + ".xml")).write_bytes(xml)
+            (directory / (name + ".png")).write_bytes(self.adb.screenshot())
 
     def back_to_forum(self) -> bytes:
         self.adb.shell("input", "keyevent", "4")
@@ -302,10 +350,15 @@ class ForumClient:
         comment_keys: set[tuple[str, str]] = set()
         stale_pages = 0
         pages_scanned = 0
+        text_blocks: list[str] = []
 
         for page in range(1, max_pages + 1):
             pages_scanned = page
-            before = len(image_hashes) + len(comment_keys)
+            before = len(image_hashes) + len(comment_keys) + len(text_blocks)
+            for node in parse_nodes(xml_bytes):
+                value = node.description.strip()
+                if value and value not in text_blocks:
+                    text_blocks.append(value)
             screenshot = self.adb.screenshot() if include_images else b""
             if include_images:
                 for bounds in self._detail_image_bounds(xml_bytes):
@@ -326,9 +379,7 @@ class ForumClient:
                     comment_keys.add(key)
                     comments.append(comment.to_dict())
 
-            if not include_images and not include_comments:
-                break
-            if len(image_hashes) + len(comment_keys) == before:
+            if len(image_hashes) + len(comment_keys) + len(text_blocks) == before:
                 stale_pages += 1
             else:
                 stale_pages = 0
@@ -339,5 +390,8 @@ class ForumClient:
             self._sleep()
             xml_bytes = self.adb.hierarchy()
 
-        self.back_to_forum()
-        return DetailResult(images=image_paths, comments=comments, pages_scanned=pages_scanned)
+        # A detail page may have been opened from search results, not the feed.
+        self.adb.shell("input", "keyevent", "4")
+        self._sleep()
+        return DetailResult(images=image_paths, comments=comments, pages_scanned=pages_scanned,
+                            text_blocks=text_blocks)

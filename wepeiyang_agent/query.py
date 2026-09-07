@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+import uuid
 
 from .forum import ForumClient, SECTIONS
 from .parser import ForumPost, parse_post_description, parse_posts, screen_bounds
@@ -317,7 +318,7 @@ class QueryEngine:
         local_posts: list[dict] = []
         if source in {"local", "hybrid"}:
             local_posts = self.index.search(spec)
-            if source == "local" or len(local_posts) >= spec.count:
+            if source == "local":
                 return QueryResult(
                     posts=local_posts,
                     source="local",
@@ -329,24 +330,75 @@ class QueryEngine:
             query=spec.query,
             section=spec.section,
             min_likes=spec.min_likes,
-            count=spec.count - len(local_posts),
+            count=spec.count,
             since=spec.since,
             exclude_pinned=spec.exclude_pinned,
             only_images=spec.only_images,
         )
-        live_result = self.live(
+        live_result = self.native_search(
             remaining_spec,
-            exclude={row["post_id"] for row in local_posts},
             **live_options,
         )
-        combined = [*local_posts, *live_result.posts]
+        combined = list({row["post_id"]: row for row in [*local_posts, *live_result.posts]}.values())
         combined.sort(key=lambda row: row.get("published_at") or "", reverse=True)
         return QueryResult(
             posts=combined[: spec.count],
-            source="hybrid" if source == "hybrid" else "live",
+            source="hybrid_native_search" if source == "hybrid" else "native_search",
             pages_scanned=live_result.pages_scanned,
             run_dir=live_result.run_dir,
             stopped_reason=(
                 "target_count" if len(combined) >= spec.count else live_result.stopped_reason
             ),
         )
+
+    def native_search(self, spec: QuerySpec, max_pages=20, max_seconds=300,
+                      include_images=False, include_comments=False, screenshots=True):
+        keywords = list(dict.fromkeys(k.strip() for k in (spec.query or "").split("|") if k.strip()))
+        if not keywords:
+            raise ValueError("原生搜索需要非空关键词")
+        run_dir = self.data_dir / "queries" / (datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + max_seconds
+        matched, observed = {}, {}
+        pages, reason, queries = 0, "search_results_exhausted", []
+        for keyword in keywords:
+            if time.monotonic() >= deadline or pages >= max_pages:
+                reason = "budget_exhausted"
+                break
+            xml = self.forum.search(keyword)
+            queries.append(keyword)
+            seen, stale = set(), 0
+            while pages < max_pages and time.monotonic() < deadline:
+                pages += 1
+                (run_dir / f"page-{pages:03d}.xml").write_bytes(xml)
+                if screenshots:
+                    (run_dir / f"page-{pages:03d}.png").write_bytes(self.forum.adb.screenshot())
+                posts = parse_posts(xml)
+                new = {p.post_id for p in posts} - seen
+                stale = stale + 1 if not new else 0
+                seen.update(new)
+                for post in posts:
+                    row = {**post.to_dict(), "source": "native_search", "search_keyword": keyword,
+                           "captured_at": datetime.now().astimezone().isoformat()}
+                    observed[post.post_id] = row
+                    if post.post_id in matched or not matches(row, spec):
+                        continue
+                    if include_images or include_comments:
+                        detail = self.forum.collect_detail(post, run_dir, include_images, include_comments)
+                        row.update(images=detail.images, comments=detail.comments, detail_text_blocks=detail.text_blocks)
+                    matched[post.post_id] = row
+                if not posts or stale >= 2 or len(matched) >= spec.count:
+                    break
+                width, height = screen_bounds(xml)
+                self.forum.adb.swipe(width // 2, round(height * .82), width // 2, round(height * .28))
+                self.forum._sleep()
+                xml = self.forum.adb.hierarchy()
+        self.index.upsert(list(observed.values()))
+        rows = sorted(matched.values(), key=lambda row: row.get("published_at") or "", reverse=True)
+        if pages >= max_pages or time.monotonic() >= deadline:
+            reason = "budget_exhausted"
+        elif len(rows) >= spec.count:
+            reason = "target_count"
+        result = QueryResult(rows[:spec.count], "native_search", pages, str(run_dir), reason)
+        self._write_json(run_dir / "result.json", {**result.to_dict(), "keywords_searched": queries})
+        return result

@@ -223,7 +223,9 @@ HELP_TEXT = """你可以直接输入，例如：
   有哪些分区
 
 输入 help 查看帮助，输入 exit / quit / 退出 结束程序。
-所有论坛操作均为只读，并受数量、页数和时间预算限制。"""
+还可以普通聊天、询问历史、记住有用信息、读图、保存本地文件。
+过程实时显示计划、操作和检查摘要；全部 LLM 请求记录到 data/traces。
+未指定数量时由 Agent 判断完成程度；运行仍有步数与时间保护。"""
 
 
 class ConsoleAgent:
@@ -233,6 +235,8 @@ class ConsoleAgent:
         data_dir: Path,
         adb_path: str | None = None,
         serial: str | None = None,
+        session: str = "default",
+        resume: str | None = None,
     ):
         self.config = config
         self.data_dir = data_dir
@@ -240,6 +244,16 @@ class ConsoleAgent:
         self.serial = serial
         self.llm = LlmController(config.llm)
         self.planner = CommandPlanner(self.llm)
+        self.session, self.resume = session, resume
+
+    def run(self, instruction: str, plan_only=False):
+        from .runtime import AgentRuntime
+        runtime = AgentRuntime(self.config, self.data_dir, self.llm,
+            lambda: ForumClient(self._adb_client(), settle_seconds=self.config.agent.settle_seconds),
+            session=self.session)
+        result = runtime.run(instruction, plan_only=plan_only, resume=self.resume)
+        self.resume = None
+        return result
 
     def _adb_client(self) -> AdbClient:
         client = AdbClient(find_adb(self.adb_path), serial=self.serial)
@@ -443,13 +457,13 @@ def run_console(agent: ConsoleAgent, ask: str | None = None, plan_only: bool = F
 
 def _run_instruction(agent: ConsoleAgent, instruction: str, plan_only: bool) -> int:
     try:
-        print("\n正在理解指令……")
-        plan = agent.planner.plan(instruction)
-        if plan_only:
-            print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
-            return 0
-        keep_running = agent.execute(plan)
-        return 0 if keep_running else 2
+        result = agent.run(instruction, plan_only=plan_only)
+        print("\n" + result["answer"])
+        print(f"\n状态：{result['status']}｜运行：{result['run_id']}\n日志：{result['trace_dir']}")
+        return 0 if result["status"] in {"complete", "planned", "needs_input"} else 1
+    except KeyboardInterrupt:
+        print(f"\n本次操作已中断，记录保存在 {agent.llm.trace.directory}。可以继续输入新指令。")
+        return 1
     except (AdbError, LlmError, OSError, ValueError) as exc:
-        print(f"\n错误：{exc}")
+        print(f"\n错误：{agent.llm.trace.clean(str(exc))}\n日志：{agent.llm.trace.directory}")
         return 1

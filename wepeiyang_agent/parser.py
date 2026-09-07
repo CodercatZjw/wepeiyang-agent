@@ -62,7 +62,7 @@ def parse_nodes(xml_bytes: bytes) -> list[UiNode]:
     for element in root.iter("node"):
         nodes.append(
             UiNode(
-                description=element.attrib.get("content-desc", ""),
+                description=element.attrib.get("content-desc", "") or element.attrib.get("text", ""),
                 bounds=parse_bounds(element.attrib.get("bounds", "")),
                 class_name=element.attrib.get("class", ""),
                 clickable=element.attrib.get("clickable") == "true",

@@ -5,12 +5,25 @@ import re
 import time
 import urllib.error
 import urllib.request
+import uuid
+import base64
+import mimetypes
+from pathlib import Path
 from dataclasses import dataclass
 
 from .config import LlmConfig
+from .trace import Trace
 
 
 class LlmError(RuntimeError):
+    pass
+
+
+class LlmTransportError(LlmError):
+    pass
+
+
+class LlmBudgetError(LlmError):
     pass
 
 
@@ -60,8 +73,12 @@ def _extract_json(text: str) -> dict:
 
 
 class LlmController:
-    def __init__(self, config: LlmConfig):
+    def __init__(self, config: LlmConfig, trace: Trace | None = None):
         self.config = config
+        self.trace = trace or Trace(Path(__file__).resolve().parents[1] / "data" / "traces", (config.api_key,))
+        self.deadline = None
+        self.request_count = 0
+        self.max_requests = None
 
     def _request_payload(self, observation: dict) -> dict:
         prompt = json.dumps(observation, ensure_ascii=False, separators=(",", ":"))
@@ -125,6 +142,7 @@ class LlmController:
         schema: dict,
         schema_name: str,
         max_output_tokens: int = 600,
+        images: list[Path] | None = None,
     ) -> dict:
         prompt = json.dumps(input_payload, ensure_ascii=False, separators=(",", ":"))
         if self.config.api_format == "responses":
@@ -154,12 +172,44 @@ class LlmController:
                 ],
             }
 
+        if images:
+            parts = []
+            for path in images:
+                mime = mimetypes.guess_type(str(path))[0]
+                if mime not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+                    raise ValueError("不支持的图像格式")
+                if path.stat().st_size > 20 * 1024 * 1024:
+                    raise ValueError("单张图片不能超过 20 MB")
+                data_url = f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+                parts.append({"type": "input_image", "image_url": data_url} if self.config.api_format == "responses"
+                             else {"type": "image_url", "image_url": {"url": data_url}})
+            if self.config.api_format == "responses":
+                payload["input"] = [{"role": "user", "content": [{"type": "input_text", "text": prompt}, *parts]}]
+            else:
+                payload["messages"][-1]["content"] = [{"type": "text", "text": prompt}, *parts]
+        response_payload = self.request_payload(payload, schema_name)
+        try:
+            result = _extract_json(self._response_text(response_payload))
+            from jsonschema import validate, ValidationError
+            try:
+                validate(result, schema)
+            except ValidationError as exc:
+                raise LlmError(f"模型结果不符合 {schema_name} 参数结构：{exc.message}") from exc
+            return result
+        except (LlmError, ValueError) as exc:
+            self.trace.record("llm.validation_error", purpose=schema_name, error=str(exc))
+            raise
+
+    def request_payload(self, payload: dict, purpose: str, url: str | None = None,
+                        api_key: str | None = None) -> dict:
+        key = self.config.api_key if api_key is None else api_key
+        self.trace.secrets = tuple(value for value in set((*self.trace.secrets, key)) if value)
         request = urllib.request.Request(
-            self.config.url,
+            url or self.config.url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST",
             headers={
-                "Authorization": f"Bearer {self.config.api_key}",
+                "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "User-Agent": "wepeiyang-agent/0.4",
@@ -168,30 +218,72 @@ class LlmController:
         raw: bytes | None = None
         last_error: BaseException | None = None
         for attempt in range(3):
+            retry_delay = attempt + 1
+            remaining = self.deadline - time.monotonic() if self.deadline else self.config.timeout_seconds
+            if remaining <= 0 or (self.max_requests is not None and self.request_count >= self.max_requests):
+                raise LlmBudgetError("运行预算已耗尽，尚未完成的工作已保留在日志中。")
+            self.request_count += 1
+            request_id = uuid.uuid4().hex
+            self.trace.record("llm.request", request_id=request_id, attempt=attempt + 1,
+                              purpose=purpose, url=url or self.config.url, payload=payload)
+            started = time.monotonic()
             try:
                 with urllib.request.urlopen(
-                    request, timeout=self.config.timeout_seconds
+                    request, timeout=min(self.config.timeout_seconds, remaining)
                 ) as response:
                     raw = response.read()
+                decoded = raw.decode("utf-8", "replace")
+                try:
+                    response_payload = json.loads(decoded)
+                except json.JSONDecodeError:
+                    self.trace.record("llm.response", request_id=request_id, raw=decoded,
+                                      elapsed_seconds=time.monotonic() - started)
+                    raise LlmError("LLM API 没有返回有效 JSON 响应。")
+                self.trace.record("llm.response", request_id=request_id, payload=response_payload,
+                                  usage=response_payload.get("usage") if isinstance(response_payload, dict) else None,
+                                  elapsed_seconds=time.monotonic() - started)
+                if not isinstance(response_payload, dict):
+                    raise LlmError("LLM 响应不是对象")
+                if response_payload.get("error") or response_payload.get("status") in {"failed", "incomplete"}:
+                    raise LlmError(f"LLM 未完成响应：{response_payload.get('error') or response_payload.get('incomplete_details')}")
                 break
             except urllib.error.HTTPError as exc:
-                details = exc.read().decode("utf-8", "replace")[:1000]
+                details = exc.read().decode("utf-8", "replace")
+                self.trace.record("llm.error", request_id=request_id, status=exc.code, error=details,
+                                  elapsed_seconds=time.monotonic() - started)
                 retryable = exc.code in {408, 429} or exc.code >= 500
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                try:
+                    if retry_after is None:
+                        retry_after = json.loads(details).get("retry_after")
+                    if retry_after is not None:
+                        retry_delay = min(300, max(retry_delay, float(retry_after)))
+                except (ValueError, TypeError, AttributeError):
+                    pass
                 if not retryable or attempt == 2:
-                    raise LlmError(f"LLM API 返回 HTTP {exc.code}：{details}") from exc
+                    raise LlmTransportError(f"LLM API 返回 HTTP {exc.code}：{self.trace.clean(details[:1000])}") from exc
                 last_error = exc
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                self.trace.record("llm.error", request_id=request_id, error=str(exc),
+                                  elapsed_seconds=time.monotonic() - started)
                 if attempt == 2:
-                    raise LlmError(f"无法连接 LLM API：{exc}") from exc
+                    raise LlmTransportError(f"无法连接 LLM API：{self.trace.clean(str(exc))}") from exc
                 last_error = exc
-            time.sleep(attempt + 1)
+            except KeyboardInterrupt:
+                self.trace.record("llm.error", request_id=request_id, error="cancelled",
+                                  elapsed_seconds=time.monotonic() - started)
+                raise
+            if self.deadline and time.monotonic() + retry_delay >= self.deadline:
+                raise LlmBudgetError("重试等待将超过运行预算；保留状态后退出。")
+            self.trace.record("llm.retry_wait", purpose=purpose, seconds=retry_delay)
+            time.sleep(retry_delay)
         if raw is None:
             raise LlmError(f"无法连接 LLM API：{last_error}")
         try:
             response_payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise LlmError("LLM API 没有返回有效 JSON 响应。") from exc
-        return _extract_json(self._response_text(response_payload))
+        return response_payload
 
     def decide(self, observation: dict) -> LlmDecision:
         decision_payload = self.request_json(

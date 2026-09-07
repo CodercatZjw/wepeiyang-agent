@@ -155,6 +155,43 @@ class AdbClient:
     def tap(self, x: int, y: int) -> None:
         self.shell("input", "tap", str(x), str(y))
 
+    def input_unicode(self, text: str) -> None:
+        """Input Chinese entirely over ADB, restoring the original input method."""
+        import base64
+        if not text or len(text) > 100 or any(ord(c) < 32 for c in text):
+            raise AdbError("搜索词必须为 1–100 字且不能包含控制字符")
+        package = "org.wepeiyang.inputbridge"
+        if not self.package_installed(package):
+            apk = Path(__file__).with_name("assets") / "wpy-input.apk"
+            if not apk.is_file():
+                raise AdbError("缺少 ADB 中文输入组件，请重新安装完整项目")
+            self.run("install", "-r", str(apk), timeout=90)
+            if not self.package_installed(package):
+                raise AdbError("安装 ADB 中文输入组件失败")
+        ime = package + "/.InputBridge"
+        previous = self.shell("settings", "get", "secure", "default_input_method").strip()
+        enabled = self.shell("settings", "get", "secure", "enabled_input_methods").strip()
+        if not previous or previous == "null":
+            raise AdbError("无法读取原输入法")
+        try:
+            self.shell("ime", "enable", ime)
+            self.shell("ime", "set", ime)
+            time.sleep(1)
+            encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            for attempt in range(3):
+                result = self.shell("am", "broadcast", "-a", package + ".INPUT",
+                                    "-p", package, "--es", "text_b64", encoded)
+                if "result=1" in result:
+                    return
+                time.sleep(.5)
+            raise AdbError("ADB 输入未连接到天外天搜索框")
+        finally:
+            self.shell("ime", "set", previous, check=False)
+            if self.shell("settings", "get", "secure", "default_input_method").strip() != previous:
+                raise AdbError("未能恢复原输入法：" + previous)
+            if ime not in enabled:
+                self.shell("ime", "disable", ime, check=False)
+
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 650) -> None:
         self.shell(
             "input",
@@ -186,4 +223,3 @@ class AdbClient:
         if not match:
             raise AdbError(f"无法识别屏幕尺寸：{output.strip()}")
         return int(match.group(1)), int(match.group(2))
-

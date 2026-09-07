@@ -12,7 +12,7 @@
 
 </div>
 
-WePeiYang Agent 是一个运行在蓝叠模拟器外部的只读校园论坛 Agent。它通过 ADB 驱动天外天 App，从安卓无障碍页面结构中读取帖子，再由 CLI 或 Codex Skill 完成分区浏览、条件筛选、关键词搜索、图片保存和评论采集。
+WePeiYang Agent 是一个运行在蓝叠模拟器外部的校园论坛 Agent。v0.5 将多轮对话、原生搜索、栏目浏览、图像理解、本地文件和长期记忆放在同一个 Plan–Executor 循环中：规划下一步、调用 Skill、观察结果、独立检查，再决定继续或回答。
 
 它不依赖 OCR，也不调用或逆向论坛私有接口；公开能力中没有发帖、回复、点赞、点踩或收藏操作。
 
@@ -20,7 +20,7 @@ WePeiYang Agent 是一个运行在蓝叠模拟器外部的只读校园论坛 Age
 
 校园论坛的信息价值往往埋在持续刷新的信息流里：课程资料、竞赛消息、校园服务和偶发趣事都很分散。这个项目先把“稳定、安全地读帖”做成通用底座，为后续的定时摘要和手机推送提供结构化数据。
 
-当前版本聚焦采集。自动总结、定时运行和手机推送尚未接入。
+当前可以按指令采集、总结、对话和维护记忆。无人值守每日调度、手机推送尚未接入；记忆维护在运行任务时检查是否到期，也可通过 CLI 单独运行。
 
 ## 快速开始
 
@@ -37,7 +37,7 @@ WePeiYang Agent 是一个运行在蓝叠模拟器外部的只读校园论坛 Age
 
 ```powershell
 python -m pip install -e .
-Copy-Item config.example.json config.json
+if (-not (Test-Path config.json)) { Copy-Item config.example.json config.json }
 ```
 
 ### 2. 配置 LLM API
@@ -51,7 +51,7 @@ Copy-Item config.example.json config.json
     "api_key": "你的 API Key",
     "model": "你的模型名",
     "api_format": "responses",
-    "timeout_seconds": 60
+    "timeout_seconds": 180
   }
 }
 ```
@@ -111,7 +111,18 @@ Copy-Item -Recurse skill\wepeiyang-forum "$env:USERPROFILE\.codex\skills\wepeiya
 从学习区找两篇带图帖，并把评论一起带回来
 ```
 
-Skill 会把自然语言转换为有限、只读的 CLI 参数，并始终设置数量、页数和运行时间上限。信息流没有尽头，Agent 不以“刷完”为完成条件。
+项目内的 Agent Skills 位于 `wepeiyang_agent/skills/`，同一套能力可由模型组合调用，也可通过 `skill` CLI 直接使用。信息流没有尽头；未指定数量时，Agent 依据目标覆盖与信息增益决定停止。达到步数、时间或请求预算时会报告未完成并保留可恢复状态。
+
+```powershell
+python -m wepeiyang_agent skills
+python -m wepeiyang_agent skills vision.inspect
+python -m wepeiyang_agent skill memory.status
+python -m wepeiyang_agent skill memory.maintain
+python -m wepeiyang_agent chat --session campus
+python -m wepeiyang_agent chat --resume RUN_ID
+```
+
+复杂参数可保存为 JSON 文件，使用 `skill 名称 --args-file 参数文件.json`，避免 CMD 与 PowerShell 的引号差异。详细说明见 [运行与日志指南](docs/runtime.md)。
 
 ## CLI 示例
 
@@ -154,14 +165,15 @@ python -m wepeiyang_agent find `
 
 ## 它如何工作
 
-`自然语言 → Codex Skill → 只读 CLI → ADB → 天外天界面 → 结构化帖子 → 本地索引 / JSON`
+`对话与历史 → 动态计划 → Skill Executor → 结构化观察 → Result Checker → 继续规划 / 回答`
 
-面向下一阶段的 Codex / Hermes 风格智能 Agent 重构方案见[目标架构图](docs/architecture/intelligent-agent-architecture.svg)。该图描述的是规划目标，不代表当前版本已经具备其中的 Planner、动态任务图、Vision、多模态 Responses、RAG 和长期记忆维护能力。
+完整方向见[目标架构图](docs/architecture/intelligent-agent-architecture.svg)。当前已实现串行执行的动态依赖任务图、独立结果检查、Vision、RAG、记忆维护与持久化会话；图中的并行执行、后台定时服务和推送仍属于后续目标。
 
 - **页面读取**：解析安卓 UI hierarchy，而不是识别截图文字。
-- **混合搜索**：`hybrid` 先查本地索引，不足时再进入 App 实时浏览。
-- **图片模式**：打开详情并保存屏幕中可见的图片区域；不下载原图，也不发送给视觉模型。
-- **安全停止**：目标数量、最大页数、最长时间和连续无新帖共同限制运行范围。
+- **原生搜索**：逐词进入 App 搜索框，回读关键词，再解析结果；不回退到信息流找关键词。`hybrid` 合并本地与实时搜索结果。
+- **图片模式**：保存屏幕中可见的图片区域，Vision Skill 将所选图片发送给已配置模型，返回文字、事实、不确定性与来源。图片采集不是下载服务器原图。
+- **长期记忆**：SQLite 保存正文、来源、时效与版本；Qdrant 保存分块向量。默认本地 `BAAI/bge-small-zh-v1.5`，首次使用自动下载模型，也可配置远程 Embeddings。
+- **执行透明**：CMD 显示计划、行动依据摘要、工具结果与检查结论。所有 LLM 请求在发送前记录，每次重试独立编号，响应、用量、耗时和错误均可追溯。不会把过程摘要冒充模型内部隐藏思维链。
 
 ## 数据产物
 
@@ -175,16 +187,22 @@ python -m wepeiyang_agent find `
 | `runs/<时间>/` | 一次 LLM 刷帖的帖子、决策、统计与截图 |
 | `queries/<时间>/result.json` | 一次筛选或搜索的结构化结果 |
 | `queries/<时间>/media/` | 从帖子详情保存的可见图片 |
+| `traces/<run_id>/events.jsonl` | 每次模型请求/响应、重试、工具执行和检查记录（密钥脱敏） |
+| `traces/<run_id>/state.json` | 当前目标、任务图、完整工具证据及恢复状态 |
+| `traces/<run_id>/attachments/` | 图像请求的原始附件，以 SHA-256 索引 |
+| `sessions/<名称>.json` | 跨启动持久化的对话历史 |
+| `memory/` | SQLite、Qdrant、记忆 JSON 与维护备份 |
+| `files/` | Agent 可读写的笔记；覆盖前备份到 `.history/` |
 
 单篇帖子会尽量包含作者、等级、发布时间、帖子编号、标题、正文、分区、点赞数、回复数、浏览量、图片路径和评论。
 
 ## 安全与隐私边界
 
-- CLI 只暴露读取、搜索、打开详情和返回操作。
+- 论坛工具只暴露读取、搜索、打开详情和返回操作；记忆与文件有独立本地写入能力。
 - 如果页面结构改变或落在未知页面，程序会停止，而不是继续盲点。
 - 论坛内容可能包含联系方式等个人信息；采集结果默认只保存在本机，请勿直接公开上传。
-- `browse` 会把受配置长度限制的标题和正文片段发送给你配置的 LLM 服务；`find` 和 `search` 的过滤逻辑本身不要求调用 LLM。
-- 可把 `send_body_chars` 设为 `0`，让刷帖决策只发送标题。
+- `chat` 会将对话和相关工具证据发送给已配置模型，Vision 会发送所选图像；日志和采集数据默认保存在本机并被 Git 忽略。
+- `browse` 兼容入口可通过 `send_body_chars=0` 限制为标题；这个设置不限制新 Agent 的工具证据和 Vision 输入。
 
 ## 免责声明
 
