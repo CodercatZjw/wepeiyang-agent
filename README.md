@@ -156,7 +156,7 @@ python -m wepeiyang_agent find `
 
 `自然语言 → Codex Skill → 只读 CLI → ADB → 天外天界面 → 结构化帖子 → 本地索引 / JSON`
 
-面向下一阶段的 Codex / Hermes 风格智能 Agent 重构方案见[目标架构图](docs/architecture/intelligent-agent-architecture.svg)。该图描述的是规划目标，不代表当前版本已经具备其中的 Planner、动态任务图、RAG 和长期记忆能力。
+面向下一阶段的 Codex / Hermes 风格智能 Agent 重构方案见[目标架构图](docs/architecture/intelligent-agent-architecture.svg)。该图描述的是规划目标，不代表当前版本已经具备其中的 Planner、动态任务图、Vision、多模态 Responses、RAG 和长期记忆维护能力。
 
 - **页面读取**：解析安卓 UI hierarchy，而不是识别截图文字。
 - **混合搜索**：`hybrid` 先查本地索引，不足时再进入 App 实时浏览。

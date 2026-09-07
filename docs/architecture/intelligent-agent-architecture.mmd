@@ -62,8 +62,10 @@ flowchart TB
         SEARCH["Forum Search Skill<br/>明确主题必须走原生搜索"]
         BROWSE["Forum Browse Skill<br/>明确刷帖 / 每日采集 / 泛主题栏目发现"]
         DETAIL["Post Detail Skill<br/>正文 · 图片 · 评论"]
+        VISION["Vision Skill<br/>图片帖 · 海报 · 表格 · 截图理解"]
         MR["Memory Retrieve Skill<br/>历史信息与语义召回"]
         MW["Memory Write Skill<br/>提炼 · 去重 · 保存 · 回读验证"]
+        MM["Memory Maintenance Skill<br/>去重 · 冲突 · 过期 · 重嵌入"]
         FILE["Local File Skill<br/>受限路径读写"]
     end
 
@@ -71,15 +73,14 @@ flowchart TB
     EXEC --> SEARCH
     EXEC --> BROWSE
     EXEC --> DETAIL
+    EXEC --> VISION
     EXEC --> MR
     EXEC --> MW
+    EXEC --> MM
     EXEC --> FILE
 
     TALK --> OBS
-    SEARCH --> OBS
-    BROWSE --> OBS
     DETAIL --> OBS
-    MR --> OBS
     MW --> OBS
     FILE --> OBS
 
@@ -93,7 +94,7 @@ flowchart TB
     end
 
     SEARCH --> KW
-    MERGE --> SEARCH
+    MERGE --> OBS
 
     subgraph BROWSEPIPE["栏目探索链路"]
         direction LR
@@ -104,7 +105,20 @@ flowchart TB
     end
 
     BROWSE --> MAP
-    GAIN --> BROWSE
+    GAIN --> OBS
+
+    subgraph VISIONPIPE["多模态视觉链路 · 仅在图片承载信息时调用"]
+        direction LR
+        IMG["图片采集与去重<br/>原图 · 帖子来源 · 页码"]
+        PRIV["隐私与输入检查<br/>尺寸 · 敏感信息 · 发送边界"]
+        MLLM["Multimodal Responses<br/>图像 + 文本上下文"]
+        VSTRUCT["结构化提取<br/>文字 · 日期 · 地点 · 表格 · 二维码"]
+        VCHECK["视觉结果校验<br/>原图引用 · 置信度 · 低置信重试"]
+        IMG --> PRIV --> MLLM --> VSTRUCT --> VCHECK
+    end
+
+    VISION --> IMG
+    VCHECK --> OBS
 
     subgraph MEMORY["长期记忆与本地 RAG"]
         direction LR
@@ -113,41 +127,53 @@ flowchart TB
         SQL[("SQLite<br/>来源 · 时间 · 标签 · 过期策略")]
         ARCH[("Markdown / JSON<br/>帖子原文与审计记录")]
         RAG["Hybrid Retriever<br/>向量 + 关键词 + 元数据过滤"]
+        MQ["Maintenance Queue<br/>定时 / 写入后 / 检查失败触发"]
+        GOVERN["Memory Governance<br/>去重 · 合并 · 冲突版本 · TTL · 可信度"]
+        REINDEX["Index Repair<br/>重嵌入 · 索引一致性 · 归档清理"]
+        MAUDIT["Maintenance Audit<br/>变更记录 · 回读 · 检索验证 · 可回滚"]
 
         EMB --> VDB
         VDB --> RAG
         SQL --> RAG
         ARCH --> RAG
+        MQ --> GOVERN --> REINDEX --> MAUDIT
     end
 
     MR --> RAG
-    RAG --> MR
+    RAG --> OBS
     MW --> EMB
     MW --> SQL
     MW --> ARCH
+    MW --> MQ
+    MM --> MQ
+    MAUDIT --> OBS
+    REINDEX --> EMB
+    REINDEX --> SQL
+    REINDEX --> ARCH
 
     subgraph PLATFORM["外部运行环境"]
         direction LR
-        LLM["LLM APIs<br/>Responses · Embeddings"]
+        LLM["LLM APIs<br/>Multimodal Responses · Embeddings"]
         ADB["ADB / BlueStacks"]
         APP["天外天 App / 微北洋"]
         FS["受限本地文件系统"]
         ADB --> APP
     end
 
-    PLAN <--> LLM
-    CHECK <--> LLM
+    PLAN -. "推理请求" .-> LLM
+    CHECK -. "检查请求" .-> LLM
+    MLLM -. "图像请求" .-> LLM
     SEARCH --> ADB
     BROWSE --> ADB
     DETAIL --> ADB
     FILE --> FS
 
     STOP -->|"需要补充条件"| ASK["向用户追问"]
-    ASK --> USER
+    ASK --> OUT["返回 CMD / 推送通道"]
     STOP -->|"目标完成"| FINAL["Response Synthesizer<br/>基于证据生成回答并标注来源"]
     FINAL --> CONSOLIDATE["Memory Consolidator<br/>只保存长期有价值的信息"]
     CONSOLIDATE --> MW
-    FINAL --> USER
+    FINAL --> OUT
 
     classDef entry fill:#20170A,stroke:#E2B95F,color:#FFF8E8,stroke-width:2px;
     classDef core fill:#17120B,stroke:#C9A45C,color:#F7F3EA,stroke-width:2px;
@@ -159,6 +185,6 @@ flowchart TB
     class USER,TIMER entry;
     class SM,CB,PLAN,DAG,EXEC,OBS,CHECK core;
     class STOP gate;
-    class TALK,SEARCH,BROWSE,DETAIL,MR,MW,FILE,KW,BOX,SR,MERGE,MAP,FEED,GAIN,RAG skill;
+    class TALK,SEARCH,BROWSE,DETAIL,VISION,MR,MW,MM,FILE,KW,BOX,SR,MERGE,MAP,FEED,GAIN,IMG,PRIV,MLLM,VSTRUCT,VCHECK,RAG,MQ,GOVERN,REINDEX,MAUDIT skill;
     class WM,VDB,SQL,ARCH,FS store;
-    class ASK,FINAL,CONSOLIDATE output;
+    class ASK,FINAL,CONSOLIDATE,OUT output;
