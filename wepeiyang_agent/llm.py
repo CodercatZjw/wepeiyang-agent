@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import http.client
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -13,6 +15,7 @@ from dataclasses import dataclass
 
 from .config import LlmConfig
 from .trace import Trace
+from .streaming import read_stream
 
 
 class LlmError(RuntimeError):
@@ -187,6 +190,9 @@ class LlmController:
                 payload["input"] = [{"role": "user", "content": [{"type": "input_text", "text": prompt}, *parts]}]
             else:
                 payload["messages"][-1]["content"] = [{"type": "text", "text": prompt}, *parts]
+        payload["stream"] = True
+        if self.config.api_format == "chat_completions":
+            payload["stream_options"] = {"include_usage": True}
         response_payload = self.request_payload(payload, schema_name)
         try:
             result = _extract_json(self._response_text(response_payload))
@@ -211,12 +217,10 @@ class LlmController:
             headers={
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
-                "Accept": "application/json",
+                "Accept": "text/event-stream" if payload.get("stream") else "application/json",
                 "User-Agent": "wepeiyang-agent/0.4",
             },
         )
-        raw: bytes | None = None
-        last_error: BaseException | None = None
         for attempt in range(3):
             retry_delay = attempt + 1
             remaining = self.deadline - time.monotonic() if self.deadline else self.config.timeout_seconds
@@ -227,30 +231,51 @@ class LlmController:
             self.trace.record("llm.request", request_id=request_id, attempt=attempt + 1,
                               purpose=purpose, url=url or self.config.url, payload=payload)
             started = time.monotonic()
+            finished = None
+            ttft = None
+            ttft_status = "no_output_received" if payload.get("stream") else "not_applicable"
+            terminal = {"event": "llm.error"}
+            stream_events = []
+
+            def first_text():
+                nonlocal ttft, ttft_status
+                if ttft is None:
+                    ttft = time.monotonic() - started
+                    ttft_status = "measured"
+
+            def check_budget():
+                if self.deadline and time.monotonic() >= self.deadline:
+                    raise LlmBudgetError("读取 LLM 流时运行预算已耗尽。")
+
             try:
                 with urllib.request.urlopen(
                     request, timeout=min(self.config.timeout_seconds, remaining)
                 ) as response:
-                    raw = response.read()
-                decoded = raw.decode("utf-8", "replace")
-                try:
-                    response_payload = json.loads(decoded)
-                except json.JSONDecodeError:
-                    self.trace.record("llm.response", request_id=request_id, raw=decoded,
-                                      elapsed_seconds=time.monotonic() - started)
-                    raise LlmError("LLM API 没有返回有效 JSON 响应。")
-                self.trace.record("llm.response", request_id=request_id, payload=response_payload,
-                                  usage=response_payload.get("usage") if isinstance(response_payload, dict) else None,
-                                  elapsed_seconds=time.monotonic() - started)
+                    content_type = getattr(response, "headers", {}).get("Content-Type", "")
+                    if "text/event-stream" in content_type.lower():
+                        response_payload = read_stream(response, self.config.api_format, first_text,
+                                                       stream_events, check_budget)
+                        finished = time.monotonic()
+                    else:
+                        if payload.get("stream"):
+                            ttft_status = "non_streaming_response"
+                        decoded = response.read().decode("utf-8", "replace")
+                        finished = time.monotonic()
+                        terminal["raw"] = decoded
+                        response_payload = json.loads(decoded)
+                terminal = {"event": "llm.response", "payload": response_payload,
+                            "usage": response_payload.get("usage") if isinstance(response_payload, dict) else None}
                 if not isinstance(response_payload, dict):
                     raise LlmError("LLM 响应不是对象")
-                if response_payload.get("error") or response_payload.get("status") in {"failed", "incomplete"}:
+                if response_payload.get("error") or response_payload.get("status") in {"failed", "incomplete", "cancelled"}:
                     raise LlmError(f"LLM 未完成响应：{response_payload.get('error') or response_payload.get('incomplete_details')}")
-                break
+                return response_payload
             except urllib.error.HTTPError as exc:
-                details = exc.read().decode("utf-8", "replace")
-                self.trace.record("llm.error", request_id=request_id, status=exc.code, error=details,
-                                  elapsed_seconds=time.monotonic() - started)
+                terminal["status"] = exc.code
+                with exc:
+                    details = exc.read().decode("utf-8", "replace")
+                finished = time.monotonic()
+                terminal["error"] = details
                 retryable = exc.code in {408, 429} or exc.code >= 500
                 retry_after = exc.headers.get("Retry-After") if exc.headers else None
                 try:
@@ -262,28 +287,36 @@ class LlmController:
                     pass
                 if not retryable or attempt == 2:
                     raise LlmTransportError(f"LLM API 返回 HTTP {exc.code}：{self.trace.clean(details[:1000])}") from exc
-                last_error = exc
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                self.trace.record("llm.error", request_id=request_id, error=str(exc),
-                                  elapsed_seconds=time.monotonic() - started)
+            except (urllib.error.URLError, TimeoutError, OSError, EOFError, http.client.HTTPException) as exc:
+                finished = time.monotonic()
+                terminal["error"] = str(exc)
                 if attempt == 2:
                     raise LlmTransportError(f"无法连接 LLM API：{self.trace.clean(str(exc))}") from exc
-                last_error = exc
+            except (ValueError, LlmError) as exc:
+                terminal.update(event="llm.error", error=str(exc))
+                if isinstance(exc, LlmError):
+                    raise
+                raise LlmError("LLM API 没有返回有效 JSON 响应或流事件。") from exc
             except KeyboardInterrupt:
-                self.trace.record("llm.error", request_id=request_id, error="cancelled",
-                                  elapsed_seconds=time.monotonic() - started)
+                terminal.update(event="llm.error", error="cancelled")
                 raise
+            finally:
+                elapsed = (finished if finished is not None else time.monotonic()) - started
+                if stream_events:
+                    terminal["stream_events"] = stream_events
+                self.trace.record(**terminal, request_id=request_id, purpose=purpose, attempt=attempt + 1,
+                                  ttft_seconds=ttft, ttft_status=ttft_status,
+                                  total_duration_seconds=elapsed, elapsed_seconds=elapsed)
+                ttft_label = f"{ttft:.3f}s" if ttft is not None else f"N/A ({ttft_status})"
+                print(self.trace.clean(
+                    f"[LLM 耗时] {purpose} | 请求 {request_id[:8]} | 第 {attempt + 1} 次 | "
+                    f"TTFT: {ttft_label} | 总时长: {elapsed:.3f}s"
+                ), file=sys.stderr, flush=True)
             if self.deadline and time.monotonic() + retry_delay >= self.deadline:
                 raise LlmBudgetError("重试等待将超过运行预算；保留状态后退出。")
             self.trace.record("llm.retry_wait", purpose=purpose, seconds=retry_delay)
             time.sleep(retry_delay)
-        if raw is None:
-            raise LlmError(f"无法连接 LLM API：{last_error}")
-        try:
-            response_payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise LlmError("LLM API 没有返回有效 JSON 响应。") from exc
-        return response_payload
+        raise LlmTransportError("LLM API 重试次数已耗尽。")
 
     def decide(self, observation: dict) -> LlmDecision:
         decision_payload = self.request_json(

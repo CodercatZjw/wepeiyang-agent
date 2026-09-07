@@ -19,6 +19,12 @@
 
 每个 HTTP 尝试发送前记录 `llm.request`，其中包含完整提示、请求体、目的、请求 ID 与重试编号。成功记录 `llm.response`、服务返回的用量和耗时；失败记录 `llm.error`。JSON/schema 错误另有记录。接口未提供用量时保留为未知，不估造数字。
 
+每次请求结束（包括失败、超时、取消和每次重试）都会在 CMD 打印 `TTFT` 和 `总时长`，并在 `data/traces/<RUN_ID>/events.jsonl` 对应的 `llm.response` / `llm.error` 中保存 `ttft_seconds`、`total_duration_seconds`、`ttft_status`。`elapsed_seconds` 保留为总时长的兼容字段；通过 `request_id` 关联请求，`attempt` 标记重试次数。计时输出写入 stderr，不污染 Skill CLI 的 stdout JSON。
+
+文本和 Vision 生成使用流式响应，兼容 Responses 和 Chat Completions。TTFT 定义为发出本次 HTTP 请求至客户端收到第一个非空文本（或拒绝文本）增量的时间，包含网络与网关延迟；不把响应头、心跳、角色、推理摘要事件算作首输出。总时长截至完整响应/流完成事件或失败，不包含重试等待、本地日志落盘与后续结果校验。流事件随终态日志保存，流中断不会当作成功。
+
+如果服务忽略 `stream=true` 返回普通 JSON，TTFT 显示 `N/A (non_streaming_response)`，日志保存 `null`；未收到输出就失败为 `no_output_received`。远程 Embedding 没有文本生成，TTFT 为 `N/A (not_applicable)`，但仍记录总时长。不会用总时长伪造 TTFT。流式格式依据 [OpenAI Docs](https://developers.openai.com/api/docs/guides/streaming-responses)。
+
 API Key 和 Authorization 不写日志。图像请求不重复写入长 Base64 字符串，而是把相同字节保存到 `attachments/`，在请求体对应位置保留文件路径、哈希和 data URL 头，可重建输入。正文和用户数据仍是本地敏感资料，不应公开提交。若服务返回推理摘要，该响应字段会随 API 响应保存；程序不依赖或声称能获取服务没有公开的隐藏思维链。
 
 ```powershell
