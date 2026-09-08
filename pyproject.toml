@@ -3,7 +3,7 @@ name = "wepeiyang-browse-agent"
 version = "0.5.0"
 description = "Read-only BlueStacks browser and collector for the WePeiYang forum."
 requires-python = ">=3.10"
-dependencies = ["Pillow>=10", "jsonschema>=4.23", "qdrant-client>=1.14,<2", "sentence-transformers>=3,<6"]
+dependencies = ["Pillow>=10", "jsonschema>=4.23", "qdrant-client>=1.14,<2", "sentence-transformers>=3,<6", "prompt-toolkit>=3.0.48,<4", "portalocker>=2.7,<4"]
 
 [project.scripts]
 wpy-agent = "wepeiyang_agent.cli:main"

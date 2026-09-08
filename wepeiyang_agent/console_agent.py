@@ -227,6 +227,8 @@ HELP_TEXT = """你可以直接输入，例如：
   有哪些分区
 
 输入 help 查看帮助，输入 exit / quit / 退出 结束程序。
+输入 / 显示命令菜单；/model 切换当前 Provider 的模型；/provider 切换或添加 Provider。
+菜单支持 ↑/↓、输入筛选、Enter 确认、Esc 取消；切换只作用于当前 CMD 会话。
 还可以普通聊天、询问历史、记住有用信息、读图、保存本地文件。
 纯聊天一轮回答；需要操作才规划，可通过 ADB 查看、点击、滑动和返回 App 页面。
 过程实时显示行动与检查摘要；全部 LLM 请求及 TTFT/总时长记录到 data/traces。
@@ -242,6 +244,7 @@ class ConsoleAgent:
         serial: str | None = None,
         session: str = "default",
         resume: str | None = None,
+        config_path: Path | None = None,
     ):
         self.config = config
         self.data_dir = data_dir
@@ -250,6 +253,7 @@ class ConsoleAgent:
         self.llm = LlmController(config.llm)
         self.planner = CommandPlanner(self.llm)
         self.session, self.resume = session, resume
+        self.config_path = (config_path or Path(__file__).resolve().parents[1] / "config.json").resolve()
 
     def run(self, instruction: str, plan_only=False):
         from .runtime import AgentRuntime
@@ -434,18 +438,26 @@ def _print_posts(posts: list[dict]) -> None:
 
 def run_console(agent: ConsoleAgent, ask: str | None = None, plan_only: bool = False) -> int:
     print("WePeiYang Agent CMD｜只读模式")
-    print("输入自然语言指令；输入 help 查看示例，输入 exit 退出。")
+    print("输入自然语言指令；输入 / 查看菜单，help 查看示例，exit 退出。")
 
-    if ask is not None:
+    if ask is not None and not ask.strip().startswith("/"):
         return _run_instruction(agent, ask, plan_only)
+
+    from .slash_menu import SlashMenu
+    menu = SlashMenu(agent)
+    if ask is not None:
+        menu.handle(ask.strip())
+        return 0
 
     while True:
         try:
-            instruction = input("\n你 > ").strip()
+            instruction = menu.ui.instruction().strip()
         except (EOFError, KeyboardInterrupt):
             print("\n已退出。")
             return 0
         if not instruction:
+            continue
+        if menu.handle(instruction):
             continue
         if instruction.casefold() in {"exit", "quit", "q", "退出"}:
             print("已退出。")

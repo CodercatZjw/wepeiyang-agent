@@ -19,6 +19,20 @@
 
 普通对话可直接回答。具体主题调用原生搜索，可以扩展多个关键词；仅搜索结果页允许为搜索目的滚动。泛美食、学习探索和明确刷帖可进入栏目。一屏是一项操作；未指定帖子数量时不会自动以三篇为目标。用户指定数量时还要完成其他子任务。
 
+## 斜杠菜单：Provider 和模型
+
+在 CMD 输入 `/` 会显示命令补全；输入 `/` 后按 Enter 也可打开命令菜单。菜单采用边框、当前项标记、方向键高亮和输入筛选；`Enter` 确认，`Esc` / `Ctrl+C` 取消。重定向输入时退化为可筛选的编号菜单。菜单命令在本地处理，不调用 LLM、不执行 App 操作，也不写入对话历史。
+
+- `/model`：从当前 Provider 获取模型列表，默认高亮当前模型，确认后只切换模型。
+- `/provider`：列出原配置的 Provider 和本地新增项，可选择已有项或“添加 Provider”。选中 Provider 后一定进入模型选择；若列表存在与原模型 ID **大小写完全一致**的模型，默认高亮它，但仍须按 Enter 确认。任何阶段取消都保留原 Provider 和模型。
+- 添加需要 URL、隐藏输入的 API Key、显示名称（默认域名）。接受完整 `/responses` / `/chat/completions` 地址，自动识别格式；也接受基础地址，此时选择接口类型。裸域名默认补 `/v1`，已有路径保持不变。远程 URL 要求 HTTPS，本机接口可用 HTTP。
+
+切换作用于当前 CMD 会话，下一次任务使用新配置，不清空会话历史、不修改原 `config.json`；重启后仍以启动配置为准。新增 Provider 在模型确认后写入启动配置旁边的 `<配置名>.providers.local.json`，下次仍可从菜单选择。该文件含**明文 API Key**，已加入 Git 忽略规则，不要分享或上传。不同 `--config` 对应不同 Provider 文件；临时菜单输入不进入历史。若远程 Embedding 原本复用 LLM Key，切换时固定原 Embedding Key，避免把新 Provider 的凭证发送给旧向量接口。
+
+模型列表使用兼容 OpenAI 的 `GET /models`，不向所有 Provider 预发请求。获取失败时可重试、手动填写模型 ID 或取消；手动填写还需确认。禁止自动跟随模型列表接口重定向，避免转发密钥。此版本不支持原生 Anthropic/Gemini 等非 OpenAI-compatible 协议，也不自动探测每个模型的图像/结构化输出能力；列表可能包含非聊天模型，选择它们可能使后续 Agent 请求失败。
+
+模型列表请求记录为 `provider.models.*`（管理请求，非 LLM 生成），包含结果/错误和总时长，不记录 Authorization；LLM 生成请求的 TTFT 和总时长记录保持不变。接口格式参考 [OpenAI 模型列表文档](https://developers.openai.com/api/reference/python/resources/models/methods/list)。
+
 ## 请求记录和过程输出
 
 每个 HTTP 尝试发送前记录 `llm.request`，其中包含完整提示、请求体、目的、请求 ID 与重试编号。成功记录 `llm.response`、服务返回的用量和耗时；失败记录 `llm.error`。JSON/schema 错误另有记录。接口未提供用量时保留为未知，不估造数字。

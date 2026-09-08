@@ -255,6 +255,7 @@ def chat(args: argparse.Namespace) -> int:
         serial=args.serial,
         session=args.session,
         resume=args.resume,
+        config_path=args.config,
     )
     return run_console(agent, ask=args.ask or ("恢复上次任务" if args.resume else None), plan_only=args.plan_only)
 
